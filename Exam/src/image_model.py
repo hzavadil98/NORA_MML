@@ -121,6 +121,43 @@ class Image_Dataloader(pl.LightningDataModule):
         )
 
 
+class Conv2Net(torch.nn.Module):
+    def __init__(self, num_classes, drop_rate=0.5, inner_size=32):
+        super().__init__()
+        self.inner_size = inner_size
+        self.num_classes = num_classes
+        self.drop_rate = drop_rate
+
+        self.featurizer = torch.nn.Sequential(
+            torch.nn.Conv2d(1, self.inner_size, kernel_size=3),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(kernel_size=2, stride=2),
+            torch.nn.Conv2d(self.inner_size, self.inner_size * 2, kernel_size=3),
+            torch.nn.Dropout(self.drop_rate),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+
+        self.fc1 = torch.nn.Linear(self.inner_size * 2 * 5 * 5, self.inner_size * 4)
+        self.dropout2 = torch.nn.Dropout(self.drop_rate)
+        self.relu3 = torch.nn.ReLU()
+
+        self.fc2 = torch.nn.Linear(self.inner_size * 4, num_classes)
+
+    def forward(self, x):
+        x = self.featurizer(x)
+        x = x.view(x.size(0), -1)  # Flatten the tensor
+        x = self.dropout2(self.relu3(self.fc1(x)))
+        x = self.fc2(x)
+        return x
+
+    def get_inner_features(self, x):
+        x = self.featurizer(x)
+        x = x.view(x.size(0), -1)  # Flatten the tensor
+        x = self.dropout2(self.relu3(self.fc1(x)))
+        return x
+
+
 class Image_Model(pl.LightningModule):
     def __init__(self, num_classes, drop_rate=0.5, inner_size=32, learning_rate=0.001):
         super().__init__()
@@ -136,19 +173,10 @@ class Image_Model(pl.LightningModule):
         self.save_hyperparameters()
 
         # Use pretrained ResNet18 model
-        self.model = torch.nn.Sequential(
-            torch.nn.Conv2d(1, self.inner_size, kernel_size=3),
-            torch.nn.ReLU(),
-            torch.nn.MaxPool2d(kernel_size=2, stride=2),
-            torch.nn.Conv2d(self.inner_size, self.inner_size * 2, kernel_size=3),
-            torch.nn.Dropout(self.drop_rate),
-            torch.nn.ReLU(),
-            torch.nn.MaxPool2d(kernel_size=2, stride=2),
-            torch.nn.Flatten(),
-            torch.nn.Linear(self.inner_size * 2 * 5 * 5, self.inner_size * 4),
-            torch.nn.Dropout(self.drop_rate),
-            torch.nn.ReLU(),
-            torch.nn.Linear(self.inner_size * 4, self.num_classes),
+        self.model = Conv2Net(
+            num_classes=self.num_classes,
+            drop_rate=self.drop_rate,
+            inner_size=self.inner_size,
         )
 
     def forward(self, x):

@@ -22,6 +22,7 @@ Author: [Your Name]
 Date: [Date]
 """
 
+import math
 from collections import OrderedDict
 from pathlib import Path
 
@@ -226,6 +227,150 @@ class Inception(torch.nn.Module):
         return y
 
 
+class Inception_Time(torch.nn.Module):
+    def __init__(
+        self,
+        num_classes,
+        in_size,
+        inner_size,
+        depth,
+        filters=[11, 21, 41],
+        drop_rate=0.5,
+    ):
+        super(Inception_Time, self).__init__()
+        self.in_size = in_size
+        self.inner_size = inner_size
+        self.depth = depth
+        self.filters = filters
+        self.drop_rate = drop_rate
+
+        modules = OrderedDict()
+
+        for f in filters:
+            modules[f"conv_{f}"] = torch.nn.Conv1d(
+                in_channels=in_size,
+                out_channels=inner_size,
+                kernel_size=f,
+                stride=1,
+                padding="same",
+                bias=False,
+            )
+
+        for d in range(depth):
+            modules[f"inception_{d}"] = Inception(
+                in_size=in_size if d == 0 else 4 * inner_size,
+                inner_size=inner_size,
+                filters=filters,
+                drop_rate=drop_rate,
+            )
+            if d % 3 == 2:
+                modules[f"residual_{d}"] = Residual(
+                    in_size=in_size if d == 2 else 4 * inner_size,
+                    out_size=inner_size,
+                )
+
+        modules["avg_pool"] = Lambda(f=lambda x: torch.mean(x, dim=-1))
+
+        self.featurizer = torch.nn.Sequential(modules)
+
+        self.classifier = torch.nn.Sequential(
+            torch.nn.Flatten(),
+            torch.nn.Linear(in_features=4 * inner_size, out_features=inner_size),
+            torch.nn.Linear(in_features=inner_size, out_features=num_classes),
+        )
+
+    def forward(self, x):
+        y = None
+        for d in range(self.depth):
+            y = self.featurizer.get_submodule(f"inception_{d}")(x if d == 0 else y)
+            if d % 3 == 2:
+                y = self.featurizer.get_submodule(f"residual_{d}")(x, y)
+                x = y
+        y = self.featurizer.get_submodule("avg_pool")(y)
+        # y = self.model.get_submodule('linear')(y)
+        y = self.classifier(y)
+        return y
+
+    def get_inner_features(self, x):
+        y = None
+        for d in range(self.depth):
+            y = self.featurizer.get_submodule(f"inception_{d}")(x if d == 0 else y)
+            if d % 3 == 2:
+                y = self.featurizer.get_submodule(f"residual_{d}")(x, y)
+                x = y
+        y = self.featurizer.get_submodule("avg_pool")(y)
+        # y = self.model.get_submodule('linear')(y)
+        return y
+
+
+class SamePadConv1d(torch.nn.Module):
+    def __init__(
+        self, in_channels, out_channels, kernel_size, stride=1, dilation=1, bias=True
+    ):
+        super().__init__()
+        self.stride = stride
+        self.dilation = dilation
+        self.kernel_size = kernel_size
+        self.conv = torch.nn.Conv1d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=0,
+            dilation=dilation,
+            bias=bias,
+        )
+
+    def forward(self, x):
+        L_in = x.shape[-1]
+        effective_kernel = self.dilation * (self.kernel_size - 1) + 1
+        L_out = math.ceil(L_in / self.stride)
+        padding_needed = max((L_out - 1) * self.stride + effective_kernel - L_in, 0)
+        pad_left = padding_needed // 2
+        pad_right = padding_needed - pad_left
+        x = torch.functional.F.pad(
+            x, (pad_left, pad_right)
+        )  # F.pad takes (left, right)
+        return self.conv(x)
+
+
+class Conv1Net(torch.nn.Module):
+    def __init__(self, num_classes, drop_rate=0.5, inner_size=32):
+        super().__init__()
+        self.inner_size = inner_size
+        self.num_classes = num_classes
+        self.drop_rate = drop_rate
+
+        self.featurizer = torch.nn.Sequential(
+            SamePadConv1d(1, self.inner_size, kernel_size=100, stride=4),
+            torch.nn.ReLU(),
+            SamePadConv1d(
+                self.inner_size, self.inner_size * 2, kernel_size=25, stride=4
+            ),
+            torch.nn.Dropout(self.drop_rate),
+            torch.nn.ReLU(),
+        )
+
+        self.fc1 = torch.nn.Linear(self.inner_size * 2 * 500, self.inner_size * 4)
+        self.dropout2 = torch.nn.Dropout(self.drop_rate)
+        self.relu3 = torch.nn.ReLU()
+
+        self.fc2 = torch.nn.Linear(self.inner_size * 4, num_classes)
+
+    def forward(self, x):
+        x = self.featurizer(x)
+        x = x.view(x.size(0), -1)  # Flatten the tensor
+        x = self.dropout2(self.relu3(self.fc1(x)))
+        x = self.fc2(x)
+        return x
+
+    def get_inner_features(self, x):
+        x = self.featurizer(x)
+        x = x.view(x.size(0), -1)  # Flatten the tensor
+        x = self.dropout2(self.relu3(self.fc1(x)))
+        return x
+
+
 class Audio_Model(pl.LightningModule):
     def __init__(
         self,
@@ -247,46 +392,19 @@ class Audio_Model(pl.LightningModule):
         self.num_classes = num_classes
         self.inner_size = inner_size
         self.depth = depth
+        self.filters = filters
+        self.drop_rate = drop_rate
 
         self.save_hyperparameters()
 
-        modules = OrderedDict()
-
-        for d in range(depth):
-            modules[f"inception_{d}"] = Inception(
-                in_size=in_size if d == 0 else 4 * inner_size,
-                inner_size=inner_size,
-                filters=filters,
-                drop_rate=drop_rate,
-            )
-            if d % 3 == 2:
-                modules[f"residual_{d}"] = Residual(
-                    in_size=in_size if d == 2 else 4 * inner_size,
-                    out_size=inner_size,
-                )
-
-        modules["avg_pool"] = Lambda(f=lambda x: torch.mean(x, dim=-1))
-        # modules['linear'] = torch.nn.Linear(in_features=4 * inner_size, out_features=num_classes)
-
-        self.featurizer = torch.nn.Sequential(modules)
-
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Flatten(),
-            torch.nn.Linear(in_features=4 * inner_size, out_features=inner_size),
-            torch.nn.Linear(in_features=inner_size, out_features=num_classes),
+        self.model = Conv1Net(
+            num_classes=self.num_classes,
+            drop_rate=self.drop_rate,
+            inner_size=self.inner_size,
         )
 
     def forward(self, x):
-        y = None
-        for d in range(self.depth):
-            y = self.featurizer.get_submodule(f"inception_{d}")(x if d == 0 else y)
-            if d % 3 == 2:
-                y = self.featurizer.get_submodule(f"residual_{d}")(x, y)
-                x = y
-        y = self.featurizer.get_submodule("avg_pool")(y)
-        # y = self.model.get_submodule('linear')(y)
-        y = self.classifier(y)
-        return y
+        return self.model(x)
 
     def training_step(self, batch, batch_idx):
         x, y = batch
