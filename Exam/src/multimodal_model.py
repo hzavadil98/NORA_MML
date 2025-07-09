@@ -1,3 +1,69 @@
+"""
+===============================================================================
+PyTorch Lightning Multimodal Classification Components
+===============================================================================
+
+This module implements PyTorch Lightning components for multimodal classification
+task that combines image and audio data. It provides a comprehensive framework
+for training and evaluating multimodal neural networks with various fusion
+strategies for combining the two modalities.
+
+Classes:
+--------
+- Multimodal_Dataset: Custom PyTorch Dataset for loading paired image-audio data
+- Multimodal_Dataloader: PyTorch Lightning DataModule for multimodal data management
+- AttentionFusion: Cross-modal attention mechanism for feature fusion
+- GatedFusion: Gated fusion with learnable modality gates
+- BilinearFusion: Bilinear pooling for multimodal feature combination
+- FactorizedBilinearFusion: Efficient factorized bilinear pooling
+- Multimodal_Model: PyTorch Lightning Module with configurable fusion strategies
+
+Fusion Methods:
+--------------
+- Concatenation: Simple feature concatenation
+- Addition: Element-wise addition of features
+- Multiplication: Element-wise multiplication of features
+- Maximum: Element-wise maximum of features
+- Attention: Cross-modal attention fusion
+- Gated: Learnable gated fusion
+- Bilinear: Bilinear pooling fusion
+- Factorized Bilinear: Efficient factorized bilinear pooling
+
+Features:
+---------
+- Multiple fusion strategies for combining image and audio modalities
+- Automatic train/validation/test data splitting with stratification
+- Integration with Conv2Net (image) and Conv1Net (audio) architectures
+- Built-in metrics tracking (accuracy, loss, confusion matrix)
+- Weights & Biases integration for experiment logging
+- Configurable dropout, learning rates, and model dimensions
+
+Usage:
+------
+```python
+from pathlib import Path
+from multimodal_model import Multimodal_Dataloader, Multimodal_Model
+
+# Initialize data module
+data_module = Multimodal_Dataloader(
+    path_to_data=Path("data/"),
+    batch_size=32,
+    val_ratio=0.2
+)
+
+# Initialize model with attention fusion
+model = Multimodal_Model(
+    num_classes=10,
+    fusion_method="attention",
+    learning_rate=0.001
+)
+
+# Train with PyTorch Lightning Trainer
+trainer = pl.Trainer(max_epochs=10)
+trainer.fit(model, data_module)
+```
+"""
+
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -14,6 +80,31 @@ from torchmetrics.classification import Accuracy, MulticlassConfusionMatrix
 
 
 class Multimodal_Dataset(Dataset):
+    """
+    Custom PyTorch Dataset for loading paired image-audio data with labels.
+
+    This dataset class handles pre-loaded image and audio tensor pairs with
+    corresponding labels. It supports optional transformations for both modalities
+    and returns tuples of (image, audio) data paired with labels.
+
+    Args:
+        image_tensor (torch.Tensor): Tensor containing image data
+        audio_tensor (torch.Tensor): Tensor containing audio data
+        labels_tensor (torch.Tensor): Tensor containing corresponding labels
+        image_transform (callable, optional): Optional transform for image data
+        audio_transform (callable, optional): Optional transform for audio data
+
+    Returns:
+        tuple: ((image, audio), label) where image and audio are tensors
+
+    Example:
+        >>> images = torch.load("images.pth")
+        >>> audio = torch.load("audio.pth")
+        >>> labels = torch.load("labels.pth")
+        >>> dataset = Multimodal_Dataset(images, audio, labels)
+        >>> (img, aud), label = dataset[0]
+    """
+
     def __init__(
         self,
         image_tensor,
@@ -46,6 +137,44 @@ class Multimodal_Dataset(Dataset):
 
 
 class Multimodal_Dataloader(pl.LightningDataModule):
+    """
+    PyTorch Lightning DataModule for managing multimodal dataset loading and splitting.
+
+    This DataModule handles paired image-audio data, automatically performing
+    train/validation/test splits from the provided training data and loading
+    test data separately. It expects data to be stored as .pth tensor files
+    and automatically converts data to float32 dtype for compatibility.
+
+    Args:
+        path_to_data (Path): Path to directory containing the .pth data files
+        batch_size (int, optional): Batch size for all DataLoaders. Defaults to 32.
+        val_ratio (float, optional): Fraction of training data to use for validation.
+            Defaults to 0.2.
+        num_workers (int, optional): Number of worker processes for data loading.
+            Defaults to 4.
+        image_transform (callable, optional): Transform to apply to training images only.
+            Defaults to None.
+        audio_transform (callable, optional): Transform to apply to training audio only.
+            Defaults to None.
+
+    Expected Data Files:
+        - training_images.pth: Training image tensors
+        - training_audio.pth: Training audio tensors (1D time series)
+        - training_audio_labels.pth: Training labels (shared for both modalities)
+        - test_images.pth: Test image tensors
+        - test_audio.pth: Test audio tensors
+        - test_audio_labels.pth: Test labels
+
+    Example:
+        >>> from pathlib import Path
+        >>> data_module = Multimodal_Dataloader(
+        ...     path_to_data=Path("data/"),
+        ...     batch_size=64,
+        ...     val_ratio=0.15
+        ... )
+        >>> trainer.fit(model, data_module)
+    """
+
     def __init__(
         self,
         path_to_data: Path,
@@ -146,7 +275,22 @@ class Multimodal_Dataloader(pl.LightningDataModule):
 
 
 class AttentionFusion(torch.nn.Module):
-    """Cross-modal attention fusion"""
+    """
+    Cross-modal attention mechanism for feature fusion.
+
+    This fusion module implements bidirectional cross-modal attention where
+    image features attend to audio features and vice versa. The attended
+    features are combined and layer-normalized to produce the final fused
+    representation.
+
+    Args:
+        feature_dim (int): Dimension of input features from both modalities
+
+    Example:
+        >>> fusion = AttentionFusion(feature_dim=128)
+        >>> fused = fusion(image_features, audio_features)
+        >>> print(fused.shape)  # (batch_size, feature_dim)
+    """
 
     def __init__(self, feature_dim):
         super().__init__()
@@ -173,7 +317,22 @@ class AttentionFusion(torch.nn.Module):
 
 
 class GatedFusion(torch.nn.Module):
-    """Gated fusion with learnable gates"""
+    """
+    Gated fusion with learnable modality gates.
+
+    This fusion module learns to gate each modality's contribution to the
+    final representation. It applies sigmoid gates to weight the importance
+    of each feature, then concatenates them and weighs them using an additional
+    fusion gate.
+
+    Args:
+        feature_dim (int): Dimension of input features from both modalities
+
+    Example:
+        >>> fusion = GatedFusion(feature_dim=128)
+        >>> fused = fusion(image_features, audio_features)
+        >>> print(fused.shape)  # (batch_size, feature_dim * 2)
+    """
 
     def __init__(self, feature_dim):
         super().__init__()
@@ -198,7 +357,23 @@ class GatedFusion(torch.nn.Module):
 
 
 class BilinearFusion(torch.nn.Module):
-    """Bilinear pooling fusion"""
+    """
+    Bilinear fusion for multimodal feature combination.
+
+    This fusion module uses bilinear layer to combine features from different
+    modalities. This enables it to capture multiplicative interactions
+    between image and audio features.
+
+    Args:
+        img_dim (int): Dimension of image features
+        aud_dim (int): Dimension of audio features
+        output_dim (int): Dimension of output fused features
+
+    Example:
+        >>> fusion = BilinearFusion(img_dim=128, aud_dim=128, output_dim=256)
+        >>> fused = fusion(image_features, audio_features)
+        >>> print(fused.shape)  # (batch_size, output_dim)
+    """
 
     def __init__(self, img_dim, aud_dim, output_dim):
         super().__init__()
@@ -209,7 +384,26 @@ class BilinearFusion(torch.nn.Module):
 
 
 class FactorizedBilinearFusion(torch.nn.Module):
-    """Factorized bilinear pooling for efficiency"""
+    """
+    Factorized bilinear pooling for efficient multimodal fusion.
+
+    This fusion module implements a computationally efficient version of
+    bilinear pooling by factorizing the bilinear operation into lower-
+    dimensional projections followed by element-wise multiplication.
+
+    Args:
+        img_dim (int): Dimension of image features
+        aud_dim (int): Dimension of audio features
+        hidden_dim (int): Hidden dimension for factorization
+        output_dim (int): Dimension of output fused features
+
+    Example:
+        >>> fusion = FactorizedBilinearFusion(
+        ...     img_dim=128, aud_dim=128, hidden_dim=64, output_dim=256
+        ... )
+        >>> fused = fusion(image_features, audio_features)
+        >>> print(fused.shape)  # (batch_size, output_dim)
+    """
 
     def __init__(self, img_dim, aud_dim, hidden_dim, output_dim):
         super().__init__()
@@ -226,6 +420,60 @@ class FactorizedBilinearFusion(torch.nn.Module):
 
 
 class Multimodal_Model(pl.LightningModule):
+    """
+    PyTorch Lightning Module for multimodal classification with configurable fusion.
+
+    This Lightning module combines Conv2Net (image) and Conv1Net (audio) architectures
+    with various fusion strategies for multimodal classification. It supports multiple
+    fusion methods ranging from simple concatenation to advanced attention mechanisms.
+
+    Fusion Methods:
+        - concatenation: Simple feature concatenation
+        - addition: Element-wise addition (requires same feature dimensions)
+        - multiplication: Element-wise multiplication (requires same feature dimensions)
+        - maximum: Element-wise maximum (requires same feature dimensions)
+        - attention: Cross-modal attention fusion
+        - gated: Learnable gated fusion
+        - bilinear: Bilinear pooling fusion
+        - factorized_bilinear: Efficient factorized bilinear pooling
+
+    Features:
+        - Configurable fusion strategies
+        - Separate hyperparameters for each modality
+        - Cross-entropy loss for multi-class classification
+        - Accuracy and confusion matrix metrics
+        - Adam optimizer with configurable learning rate
+        - Automatic confusion matrix visualization with fusion method labeling
+        - Weights & Biases logging integration
+
+    Args:
+        num_classes (int): Number of output classes
+        fusion_method (str, optional): Fusion strategy to use. Defaults to "concatenation".
+        image_inner_size (int, optional): Inner size for image model. Defaults to 32.
+        image_dropout (float, optional): Dropout rate for image model. Defaults to 0.5.
+        audio_inner_size (int, optional): Inner size for audio model. Defaults to 32.
+        audio_dropout (float, optional): Dropout rate for audio model. Defaults to 0.5.
+        local_dropout (float, optional): Dropout rate for final classifier. Defaults to 0.5.
+        learning_rate (float, optional): Learning rate for Adam optimizer. Defaults to 0.001.
+
+    Example:
+        >>> # Simple concatenation fusion
+        >>> model = Multimodal_Model(num_classes=10, fusion_method="concatenation")
+        >>>
+        >>> # Advanced attention fusion with custom parameters
+        >>> model = Multimodal_Model(
+        ...     num_classes=10,
+        ...     fusion_method="attention",
+        ...     image_inner_size=64,
+        ...     audio_inner_size=64,
+        ...     learning_rate=0.001
+        ... )
+        >>>
+        >>> trainer = pl.Trainer(max_epochs=50)
+        >>> trainer.fit(model, datamodule)
+        >>> trainer.test(model, datamodule)
+    """
+
     def __init__(
         self,
         num_classes,

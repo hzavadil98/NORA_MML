@@ -1,29 +1,57 @@
 """
 ===============================================================================
-PyTorch Lightning Dataloaders and Model Definitions
+PyTorch Lightning Audio Classification Components
 ===============================================================================
 
-This module contains the implementation of PyTorch Lightning dataloaders and
-model definitions. It provides reusable components for data loading and
-model architecture, facilitating efficient training and evaluation workflows
-using the PyTorch Lightning framework.
+This module implements PyTorch Lightning components for audio only classification task,
+including data loading, model architecture, and training utilities. It provides
+a complete pipeline for training and evaluating 1D convolutional neural networks
+on time-series audio data with automatic train/validation/test splits.
 
-Classes and Functions:
-----------------------
-- Dataloaders for preparing and batching datasets.
-- Model classes defining neural network architectures compatible with Lightning.
+Classes:
+--------
+- Audio_Dataset: Custom PyTorch Dataset for loading audio tensors and labels
+- Audio_Dataloader: PyTorch Lightning DataModule for managing audio data splits
+- SamePadConv1d: 1D convolution with same padding for maintaining sequence length
+- Conv1Net: Simple 1D CNN architecture for audio classification
+- Audio_Model: PyTorch Lightning Module wrapping Conv1Net with training logic
+
+Features:
+---------
+- Automatic train/validation/test data splitting with stratification
+- Configurable dropout, batch normalization, and model dimensions
+- Built-in metrics tracking (accuracy, loss, confusion matrix)
+- Weights & Biases integration for experiment logging
+- Feature extraction capability for multimodal applications
+- Automatic dtype conversion to float32 for audio data
 
 Usage:
 ------
-Import the required dataloader or model class and integrate it into your
-Lightning training pipeline.
+```python
+from pathlib import Path
+from audio_model import Audio_Dataloader, Audio_Model
 
-Author: [Your Name]
-Date: [Date]
+# Initialize data module
+data_module = Audio_Dataloader(
+    path_to_data=Path("data/"),
+    batch_size=32,
+    val_ratio=0.2
+)
+
+# Initialize model
+model = Audio_Model(
+    num_classes=10,
+    learning_rate=0.001,
+    inner_size=32
+)
+
+# Train with PyTorch Lightning Trainer
+trainer = pl.Trainer(max_epochs=10)
+trainer.fit(model, data_module)
+```
 """
 
 import math
-from collections import OrderedDict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -38,6 +66,25 @@ from torchmetrics.classification import Accuracy, MulticlassConfusionMatrix
 
 
 class Audio_Dataset(Dataset):
+    """
+    Custom PyTorch Dataset for loading audio tensors and their corresponding labels.
+
+    This dataset class handles pre-loaded audio tensor data and provides optional
+    transformations during data loading. It's designed to work with 1D audio tensors
+    that have been saved as .pth files.
+
+    Args:
+        data_tensor (torch.Tensor): Tensor containing audio data (1D time series)
+        labels_tensor (torch.Tensor): Tensor containing corresponding labels
+        transform (callable, optional): Optional transform to be applied to samples
+
+    Example:
+        >>> audio_data = torch.load("audio.pth")
+        >>> labels = torch.load("labels.pth")
+        >>> dataset = Audio_Dataset(audio_data, labels, transform=some_transform)
+        >>> sample, label = dataset[0]
+    """
+
     def __init__(self, data_tensor, labels_tensor, transform=None):
         super().__init__()
         self.data = data_tensor
@@ -58,6 +105,40 @@ class Audio_Dataset(Dataset):
 
 
 class Audio_Dataloader(pl.LightningDataModule):
+    """
+    PyTorch Lightning DataModule for managing audio dataset loading and splitting.
+
+    This DataModule automatically handles train/validation/test splits from the
+    provided training data, loads test data separately, and creates appropriate
+    DataLoaders for each split. It expects audio data to be stored as .pth tensor
+    files and automatically converts data to float32 dtype for compatibility.
+
+    Args:
+        path_to_data (Path): Path to directory containing the .pth audio data files
+        batch_size (int, optional): Batch size for all DataLoaders. Defaults to 32.
+        val_ratio (float, optional): Fraction of training data to use for validation.
+            Defaults to 0.2.
+        num_workers (int, optional): Number of worker processes for data loading.
+            Defaults to 4.
+        transform (callable, optional): Transform to apply to training data only.
+            Defaults to None.
+
+    Expected Data Files:
+        - training_audio.pth: Training audio tensors (1D time series)
+        - training_audio_labels.pth: Training labels
+        - test_audio.pth: Test audio tensors
+        - test_audio_labels.pth: Test labels
+
+    Example:
+        >>> from pathlib import Path
+        >>> data_module = Audio_Dataloader(
+        ...     path_to_data=Path("data/"),
+        ...     batch_size=64,
+        ...     val_ratio=0.15
+        ... )
+        >>> trainer.fit(model, data_module)
+    """
+
     def __init__(
         self,
         path_to_data: Path,
@@ -127,183 +208,27 @@ class Audio_Dataloader(pl.LightningDataModule):
         )
 
 
-class Lambda(torch.nn.Module):
-    def __init__(self, f):
-        super(Lambda, self).__init__()
-        self.f = f
-
-    def forward(self, x):
-        return self.f(x)
-
-
-class Residual(torch.nn.Module):
-    def __init__(self, in_size, out_size):
-        super(Residual, self).__init__()
-
-        self.bottleneck = torch.nn.Conv1d(
-            in_channels=in_size,
-            out_channels=4 * out_size,
-            kernel_size=1,
-            stride=1,
-            padding="same",
-            bias=False,
-        )
-
-        self.batch_norm = torch.nn.BatchNorm1d(num_features=4 * out_size)
-
-    def forward(self, x, y):
-        y = y + self.batch_norm(self.bottleneck(x))
-        y = torch.nn.functional.relu(y)
-        return y
-
-
-class Inception(torch.nn.Module):
-    def __init__(self, in_size, inner_size, filters=[11, 21, 41], drop_rate=0.5):
-        super(Inception, self).__init__()
-
-        self.bottleneck1 = torch.nn.Conv1d(
-            in_channels=in_size,
-            out_channels=inner_size,
-            kernel_size=1,
-            stride=1,
-            padding="same",
-            bias=False,
-        )
-
-        self.conv1 = torch.nn.Conv1d(
-            in_channels=inner_size,
-            out_channels=inner_size,
-            kernel_size=filters[0],
-            stride=1,
-            padding="same",
-            bias=False,
-        )
-
-        self.conv2 = torch.nn.Conv1d(
-            in_channels=inner_size,
-            out_channels=inner_size,
-            kernel_size=filters[1],
-            stride=1,
-            padding="same",
-            bias=False,
-        )
-
-        self.conv3 = torch.nn.Conv1d(
-            in_channels=inner_size,
-            out_channels=inner_size,
-            kernel_size=filters[2],
-            stride=1,
-            padding="same",
-            bias=False,
-        )
-
-        self.max_pool = torch.nn.MaxPool1d(
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-
-        self.bottleneck2 = torch.nn.Conv1d(
-            in_channels=in_size,
-            out_channels=inner_size,
-            kernel_size=1,
-            stride=1,
-            padding="same",
-            bias=False,
-        )
-
-        self.batch_norm = torch.nn.BatchNorm1d(num_features=4 * inner_size)
-
-        self.dropout = torch.nn.Dropout1d(p=drop_rate)
-
-    def forward(self, x):
-        x0 = self.bottleneck1(x)
-        x1 = self.dropout(self.conv1(x0))
-        x2 = self.dropout(self.conv2(x0))
-        x3 = self.dropout(self.conv3(x0))
-        x4 = self.dropout(self.bottleneck2(self.max_pool(x)))
-        y = torch.concat([x1, x2, x3, x4], dim=1)
-        y = torch.nn.functional.relu(self.batch_norm(y))
-        return y
-
-
-class Inception_Time(torch.nn.Module):
-    def __init__(
-        self,
-        num_classes,
-        in_size,
-        inner_size,
-        depth,
-        filters=[11, 21, 41],
-        drop_rate=0.5,
-    ):
-        super(Inception_Time, self).__init__()
-        self.in_size = in_size
-        self.inner_size = inner_size
-        self.depth = depth
-        self.filters = filters
-        self.drop_rate = drop_rate
-
-        modules = OrderedDict()
-
-        for f in filters:
-            modules[f"conv_{f}"] = torch.nn.Conv1d(
-                in_channels=in_size,
-                out_channels=inner_size,
-                kernel_size=f,
-                stride=1,
-                padding="same",
-                bias=False,
-            )
-
-        for d in range(depth):
-            modules[f"inception_{d}"] = Inception(
-                in_size=in_size if d == 0 else 4 * inner_size,
-                inner_size=inner_size,
-                filters=filters,
-                drop_rate=drop_rate,
-            )
-            if d % 3 == 2:
-                modules[f"residual_{d}"] = Residual(
-                    in_size=in_size if d == 2 else 4 * inner_size,
-                    out_size=inner_size,
-                )
-
-        modules["avg_pool"] = Lambda(f=lambda x: torch.mean(x, dim=-1))
-
-        self.featurizer = torch.nn.Sequential(modules)
-
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Flatten(),
-            torch.nn.Linear(in_features=4 * inner_size, out_features=inner_size),
-            torch.nn.Linear(in_features=inner_size, out_features=num_classes),
-        )
-
-    def forward(self, x):
-        y = None
-        for d in range(self.depth):
-            y = self.featurizer.get_submodule(f"inception_{d}")(x if d == 0 else y)
-            if d % 3 == 2:
-                y = self.featurizer.get_submodule(f"residual_{d}")(x, y)
-                x = y
-        y = self.featurizer.get_submodule("avg_pool")(y)
-        # y = self.model.get_submodule('linear')(y)
-        y = self.classifier(y)
-        return y
-
-    def get_inner_features(self, x):
-        y = None
-        for d in range(self.depth):
-            y = self.featurizer.get_submodule(f"inception_{d}")(x if d == 0 else y)
-            if d % 3 == 2:
-                y = self.featurizer.get_submodule(f"residual_{d}")(x, y)
-                x = y
-        y = self.featurizer.get_submodule("avg_pool")(y)
-        # y = self.model.get_submodule('linear')(y)
-        return y
-
-
 class SamePadConv1d(torch.nn.Module):
+    """
+    1D convolution with same padding to maintain sequence length.
+
+    This module implements 1D convolution that automatically calculates and
+    applies padding to maintain the same output sequence length as the input
+    (necessary for stride > 1).
+
+    Args:
+        in_channels (int): Number of input channels
+        out_channels (int): Number of output channels
+        kernel_size (int): Convolution kernel size
+        stride (int, optional): Convolution stride. Defaults to 1.
+        dilation (int, optional): Convolution dilation. Defaults to 1.
+        bias (bool, optional): Whether to use bias. Defaults to True.
+
+    Example:
+        >>> conv = SamePadConv1d(1, 32, kernel_size=100, stride=4)
+        >>> output = conv(audio_tensor)  # Maintains sequence proportions
+    """
+
     def __init__(
         self, in_channels, out_channels, kernel_size, stride=1, dilation=1, bias=True
     ):
@@ -335,6 +260,31 @@ class SamePadConv1d(torch.nn.Module):
 
 
 class Conv1Net(torch.nn.Module):
+    """
+    Simple 1D Convolutional Neural Network for audio classification.
+
+    This network consists of two strided 1D convolutional layers with ReLU activations
+    and same-padding convolutions, followed by two fully connected layers.
+    Designed for processing 1D time-series audio data with parameters configured
+    for series of length 8000.
+
+    Architecture:
+        - SamePadConv1d(1, inner_size, kernel_size=100, stride=4) + ReLU
+        - SamePadConv1d(inner_size, inner_size*2, kernel_size=25, stride=4) + Dropout + ReLU
+        - Linear(inner_size*2*500, inner_size*4) + Dropout + ReLU
+        - Linear(inner_size*4, num_classes)
+
+    Args:
+        num_classes (int): Number of output classes
+        drop_rate (float, optional): Dropout probability. Defaults to 0.5.
+        inner_size (int, optional): Base number of filters/features. Defaults to 32.
+
+    Example:
+        >>> model = Conv1Net(num_classes=10, inner_size=64, drop_rate=0.3)
+        >>> output = model(torch.randn(32, 1, 8000))  # batch_size=32, 8000 samples
+        >>> features = model.get_inner_features(torch.randn(32, 1, 8000))
+    """
+
     def __init__(self, num_classes, drop_rate=0.5, inner_size=32):
         super().__init__()
         self.inner_size = inner_size
@@ -372,6 +322,38 @@ class Conv1Net(torch.nn.Module):
 
 
 class Audio_Model(pl.LightningModule):
+    """
+    PyTorch Lightning Module for audio classification using Conv1Net architecture.
+
+    This Lightning module wraps the Conv1Net model and provides complete training,
+    validation, and testing functionality for audio classification tasks. It includes
+    automatic metric tracking, confusion matrix generation, and Weights & Biases
+    logging integration.
+
+    Features:
+        - Cross-entropy loss for multi-class classification
+        - Accuracy and confusion matrix metrics
+        - Adam optimizer with configurable learning rate
+        - Automatic confusion matrix visualization and logging
+        - Hyperparameter saving for reproducibility
+        - Feature extraction capability for multimodal applications
+
+    Args:
+        num_classes (int): Number of output classes
+        inner_size (int, optional): Base number of filters/features for Conv1Net.
+            Defaults to 32.
+        drop_rate (float, optional): Dropout probability for the underlying Conv1Net.
+            Defaults to 0.5.
+        learning_rate (float, optional): Learning rate for Adam optimizer.
+            Defaults to 0.001.
+
+    Example:
+        >>> model = Audio_Model(num_classes=10, learning_rate=0.001)
+        >>> trainer = pl.Trainer(max_epochs=50)
+        >>> trainer.fit(model, datamodule)
+        >>> trainer.test(model, datamodule)
+    """
+
     def __init__(
         self,
         num_classes,
