@@ -11,6 +11,7 @@ wandb/
 checkpoints/
 
 .DS_Store
+artifacts/
 
 # Distribution / packaging
 .Python

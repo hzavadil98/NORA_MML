@@ -375,10 +375,7 @@ class Audio_Model(pl.LightningModule):
     def __init__(
         self,
         num_classes,
-        in_size=1,
         inner_size=32,
-        depth=3,
-        filters=[11, 21, 41],
         drop_rate=0.5,
         learning_rate=0.001,
     ):
@@ -388,19 +385,16 @@ class Audio_Model(pl.LightningModule):
         self.accuracy = Accuracy(num_classes=num_classes, task="multiclass")
         self.confusion_matrix = MulticlassConfusionMatrix(num_classes=num_classes)
 
-        self.in_size = in_size
         self.num_classes = num_classes
         self.inner_size = inner_size
-        self.depth = depth
-        self.filters = filters
         self.drop_rate = drop_rate
 
         self.save_hyperparameters()
 
         self.model = Conv1Net(
             num_classes=self.num_classes,
-            drop_rate=self.drop_rate,
             inner_size=self.inner_size,
+            drop_rate=self.drop_rate,
         )
 
     def forward(self, x):

@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 import seaborn as sns
 import torch
 import wandb
-from audio_model import Conv1Net, Inception_Time
+from audio_model import Conv1Net
 from image_model import Conv2Net
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from sklearn.model_selection import train_test_split
@@ -145,121 +145,6 @@ class Multimodal_Dataloader(pl.LightningDataModule):
         )
 
 
-class Multimodal_Model(pl.LightningModule):
-    def __init__(
-        self,
-        num_classes,
-        image_inner_size=32,
-        image_dropout=0.5,
-        audio_in_size=1,
-        audio_inner_size=32,
-        audio_depth=3,
-        audio_filters=[11, 21, 41],
-        audio_dropout=0.5,
-        local_dropout=0.5,
-        learning_rate=0.001,
-    ):
-        super().__init__()
-
-        self.num_classes = num_classes
-        self.image_inner_size = image_inner_size
-        self.image_dropout = image_dropout
-        self.audio_in_size = audio_in_size
-        self.audio_inner_size = audio_inner_size
-        self.audio_depth = audio_depth
-        self.audio_filters = audio_filters
-        self.audio_dropout = audio_dropout
-        self.local_dropout = local_dropout
-        self.learning_rate = learning_rate
-
-        self.loss = torch.nn.CrossEntropyLoss()
-        self.accuracy = Accuracy(num_classes=self.num_classes, task="multiclass")
-        self.confusion_matrix = MulticlassConfusionMatrix(num_classes=self.num_classes)
-
-        self.save_hyperparameters()
-
-        self.image_model = Conv2Net(
-            num_classes=num_classes,
-            inner_size=image_inner_size,
-            drop_rate=image_dropout,
-        )
-
-        self.audio_model = Inception_Time(
-            num_classes=num_classes,
-            in_size=audio_in_size,
-            inner_size=audio_inner_size,
-            depth=audio_depth,
-            filters=audio_filters,
-            drop_rate=audio_dropout,
-        )
-
-        self.audio_model = Conv1Net(
-            num_classes=num_classes,
-            inner_size=audio_inner_size,
-            drop_rate=audio_dropout,
-        )
-
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Linear(
-                in_features=self.image_model.inner_size * 4
-                + self.audio_model.inner_size * 4,
-                out_features=64,
-            ),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(self.local_dropout),
-            torch.nn.Linear(in_features=64, out_features=num_classes),
-        )
-
-    def forward(self, x):
-        image, audio = x
-        image_features = self.image_model.get_inner_features(image)
-        audio_features = self.audio_model.get_inner_features(audio)
-        combined_features = torch.cat((image_features, audio_features), dim=1)
-        logits = self.classifier(combined_features)
-        return logits
-
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
-        loss = self.loss(logits, y)
-        self.log("train_loss", loss, prog_bar=True)
-        self.log("train_accuracy", self.accuracy(logits, y), prog_bar=True)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
-        loss = self.loss(logits, y)
-        self.log("val_loss", loss, prog_bar=True)
-        self.log("val_accuracy", self.accuracy(logits, y), prog_bar=True)
-
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
-        loss = self.loss(logits, y)
-        self.log("test_loss", loss, prog_bar=True)
-        self.log("test_accuracy", self.accuracy(logits, y), prog_bar=True)
-        self.confusion_matrix.update(torch.argmax(logits, dim=1), y)
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
-
-    @rank_zero_only
-    def on_test_epoch_end(self):
-        cm = self.confusion_matrix.compute().cpu().numpy()
-
-        fig, ax = plt.subplots(figsize=(10, 10))
-        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
-        ax.set_xlabel("Predicted")
-        ax.set_ylabel("True")
-
-        ax.set_title("Confusion Matrix")
-
-        # Log confusion matrix to wandb
-        wandb.log({"confusion_matrix": wandb.Image(fig)})
-        plt.close(fig)
-
-
 class AttentionFusion(torch.nn.Module):
     """Cross-modal attention fusion"""
 
@@ -294,7 +179,7 @@ class GatedFusion(torch.nn.Module):
         super().__init__()
         self.image_gate = torch.nn.Linear(feature_dim, feature_dim)
         self.audio_gate = torch.nn.Linear(feature_dim, feature_dim)
-        self.fusion_gate = torch.nn.Linear(feature_dim * 2, feature_dim)
+        self.fusion_gate = torch.nn.Linear(feature_dim * 2, feature_dim * 2)
 
     def forward(self, image_features, audio_features):
         # Learn gates for each modality
@@ -340,17 +225,14 @@ class FactorizedBilinearFusion(torch.nn.Module):
         return self.output_proj(fused)
 
 
-class EnhancedMultimodal_Model(pl.LightningModule):
+class Multimodal_Model(pl.LightningModule):
     def __init__(
         self,
         num_classes,
         fusion_method="concatenation",  # New parameter
         image_inner_size=32,
         image_dropout=0.5,
-        audio_in_size=1,
         audio_inner_size=32,
-        audio_depth=3,
-        audio_filters=[11, 21, 41],
         audio_dropout=0.5,
         local_dropout=0.5,
         learning_rate=0.001,
@@ -361,10 +243,7 @@ class EnhancedMultimodal_Model(pl.LightningModule):
         self.fusion_method = fusion_method
         self.image_inner_size = image_inner_size
         self.image_dropout = image_dropout
-        self.audio_in_size = audio_in_size
         self.audio_inner_size = audio_inner_size
-        self.audio_depth = audio_depth
-        self.audio_filters = audio_filters
         self.audio_dropout = audio_dropout
         self.local_dropout = local_dropout
         self.learning_rate = learning_rate
@@ -406,6 +285,12 @@ class EnhancedMultimodal_Model(pl.LightningModule):
         elif fusion_method == "multiplication":
             assert img_feat_dim == aud_feat_dim, (
                 "Features must have same dimension for multiplication"
+            )
+            self.fusion = None
+            classifier_input_dim = img_feat_dim
+        elif fusion_method == "maximum":
+            assert img_feat_dim == aud_feat_dim, (
+                "Features must have same dimension for maximum"
             )
             self.fusion = None
             classifier_input_dim = img_feat_dim
